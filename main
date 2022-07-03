@@ -1,0 +1,133 @@
+#EXTRACT WORDS PER CHAPTER
+import requests
+import re
+from bs4 import BeautifulSoup
+import urllib.request
+import pandas as pd
+from nltk.tag import pos_tag
+import plotly.express as px
+import plotly.graph_objects as go
+import nltk
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk import ne_chunk, pos_tag, word_tokenize
+from nltk.tree import Tree
+from collections import Counter
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+#I MAY UPDATE THIS CODE TO USE CONCAT INSTEAD OF APPEND LATER. THE APPENDS ARE BEING APPLIED TO LIST OBJECTS ANYWAY, NOT DATAFRAMES. FOR NOW SUPPRESSING THE FUTURE DEPRECATION WARNINGS
+
+
+#FIRST, IDENTIFY A GUTENBURG NOVEL TO PULL NAMES FROM, SAMPLES BELOW
+
+#page=input('Please enter a valid Gutenburg URL\n')
+#booktitle='Dracule'
+#page='https://www.gutenberg.org/files/345/345-h/345-h.htm#chap01'
+
+booktitle='Pride and Prejudice'
+page='https://www.gutenberg.org/files/1342/1342-h/1342-h.htm'
+
+
+pagetext=BeautifulSoup(requests.get(page).content,'html.parser')
+#print(pagetext)
+
+
+
+fulltext=''
+for pg in pagetext.find_all(['p']):
+	fulltext=fulltext+(pg.get_text())
+
+#LARGELY TAKEN FROM https://unbiased-coder.com/extract-names-python-nltk/
+#THIS PARSES THROUGH THE PAGE TEXT RESULTS AND IDENTIFIES ANY PERSON ENTITES WITHIN THEM
+#THE COUNTER FUNCTION AT THE END COUNTS EACH NAME, GIVING US A WAY TO RANK EACH ENTITY'S NUMBER OF APPEARANCES IN THE ENTIRE WORK
+#IN THIS LOOP, EACH NLTK RESULT IDENTIFIED AS A PERSON IS ADDED TO A LIST. THEN THE LIST ENTITIES ARE COUNTED TO GENERATE THE NUMBER OF INSTANCES IN THE NOVEL
+
+nltk_results = ne_chunk(pos_tag(word_tokenize(fulltext)))
+namelist=[]
+#USERS AN NER TOOLKIT; NAMED ENTITY RECOGNITION
+for nltk_result in nltk_results:
+	if type(nltk_result) == Tree:
+		name = ''
+		for nltk_result_leaf in nltk_result.leaves():
+			name += nltk_result_leaf[0] + ' '
+		#print(nltk_result.label()+'|'+name)
+		#GPE IS GEO-POLITICAL ENTITY, PERSON IS A PERSON
+		if nltk_result.label()=='PERSON':
+			namelist.append(name)
+namecount=Counter(namelist)
+
+#MAKE A LIST OF THE MOST COMMON NAMED ENTITIES IN THE ENTIRE WORK SELECTED
+names=pd.DataFrame.from_dict(namecount,orient='index')
+names.reset_index(inplace=True)
+#MAKE A KEY WITH A 0 VALUE TO USE AS A CROSS-JOIN KEY WITH ANOTHER DATAFRAME LATER ON
+names['KEY']=0
+names.columns=['NAME','TOTALCOUNT','KEY']
+topnames_all=names.sort_values(by=['TOTALCOUNT'], ascending=False)
+
+#MAKE AN EMPTY DATAFRAME WITH RELEVANT COLUMNS YOU WANT TO USE LATER ON
+df=pd.DataFrame(columns=['CHAPTERNUM','CHAPTERNAME','CHAPTERMIN','CHAPTERMAX','KEY','NAME','COUNT'])
+
+#get last chapter
+chapternum=-1
+chaptertext=''
+chaptermin=1
+chaptermax=1
+chapterindex=''
+wordcount=1
+#USE THE SIMILAR CODE AS BEFORE. FIND EACH CHAPTER BY REFERENCE TO THE H2 HEADER GUTENBURG USES FOR CHAPTER BREAKS, FIND EACH NAMED ENTITY OCCURRENCE PER CHAPTER
+for pg in pagetext.find_all(['p','h2']):
+	if pg.name=='h2' and 'CHAPTER' in pg.get_text().upper():
+		chapternum+=1
+		chaptername=pg.get_text()
+		chaptermin=wordcount
+		wordcount=wordcount+len(chaptertext)
+		#RECORD CHAPTER INDEX, AND START/END PER CHAPTER
+		chaptermax=chaptermax+wordcount
+		nltk_results = ne_chunk(pos_tag(word_tokenize(chaptertext)))
+		namelist=[]
+		for nltk_result in nltk_results:
+			if type(nltk_result) == Tree:
+				name = ''
+				for nltk_result_leaf in nltk_result.leaves():
+					name += nltk_result_leaf[0] + ' '
+				if nltk_result.label()=='PERSON':
+					namelist.append(name)
+		namecount=Counter(namelist)
+		names=pd.DataFrame.from_dict(namecount,orient='index')
+		names.reset_index(inplace=True)
+		if names.empty==False:
+			names['KEY']=0
+			names.columns=['NAME','COUNT','KEY']
+			
+			dfrow=[chapternum,chaptername,chaptermin,chaptermax,0]
+			dftemp=pd.DataFrame(columns=['CHAPTERNUM','CHAPTERNAME','CHAPTERMIN','CHAPTERMAX','KEY'])
+			dftemp.loc[len(dftemp)] = dfrow
+			dftemp=dftemp.merge(names,on='KEY',how='outer')
+
+			df=df.append(dftemp)
+			pd.concat([df,dftemp])
+
+		chaptertext=''
+	if pg.name=='p':
+		chaptertext=chaptertext+(pg.get_text())
+		
+
+topnames_all.to_csv('topnames.csv')
+topnames_all=topnames_all.head(10)
+topnames_all.to_csv('topnameshead.csv')
+df.to_csv('data.csv')
+final=df[df['NAME'].isin(topnames_all['NAME'])]
+final=final.merge(topnames_all, on='NAME', how='inner')
+final=final.sort_values(by='TOTALCOUNT', ascending=True)
+fig = go.Figure(data=go.Heatmap(
+                   z=final['COUNT'],
+                   x=final['CHAPTERNUM'],
+                   y=final['NAME'],
+                   hoverongaps = False))
+fig.update_layout(title=booktitle + ': Heatmap of Character Appearances by Chapter',
+                  yaxis={"title": 'Character'},
+                  xaxis={"title": 'Chapter',"tickangle": 45}, )
+fig.show()
+
+#TO DO:
+#instead of running code twice, do an additive count at the end of the paragraph/header loop to determine which are the most common proper nouns instead of doing a full text analysis twice
